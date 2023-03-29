@@ -47,7 +47,7 @@ Plas_work = np.sum(s * V.cellArea)  # 10**-6 J/mm
 
 
 #define test functions
-y_Tests = TestFunctions(V)
+
 
 # Define PK2(F,Cp) and psi(F,Cp) of the St.Venant-Kirchhoff constitutive law.
 def PK2_func(F, Cp):
@@ -83,12 +83,13 @@ for testID in range(loadings.shape[0]):
     V.name = str(loadings[testID, 1])
 
 
-    y_Trial = TrialFunction(V)
+    y_Trial = TrialVectorFunction(V)
+    y_Tests = TestVectorFunctions(V)
     # if testID > 0:
     #     y_Trial.baseValue = np.loadtxt("yTrial.txt")
     # y_Trial.baseValue=loadtxt("yTrial_"+ V.name +".txt")
 
-    problem = EquilibriumProblem(y_Trial, y_Tests, V,psi, PK2_func)
+    problem = EquilibriumProblem(y_Trial, y_Tests, psi, PK2_func)
 
     ################boundary
     if loading==None:

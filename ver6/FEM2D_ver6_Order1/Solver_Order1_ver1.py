@@ -6,34 +6,69 @@ import scipy.sparse as sp
 
 
 
-def jac_PK1_i(PK1, Cp,nodeI_gaussID, j, y_, dy, d, y_shape, Nabla_func, PK2_func):
-    jac_PK1, J = PK1 * 0, int(j / 2)
-    localJ_F, localJ_gaussIDs = Nabla_func(np.reshape(y_ + dy[j],y_shape), int(j / 2)), nodeI_gaussID[J]
+def jac_PK1_i(PK1, Cp,nodeI_gaussID, nodei, y_, dy, d, y_shape, Nabla_func, PK2_func):
+    nodeI = int(nodei / 2)
+    localI_F, localI_gaussIDs = Nabla_func(np.reshape(y_ + dy[nodei],y_shape),  nodeI), nodeI_gaussID[nodeI]
 
-    jac_PK1[localJ_gaussIDs] = (localJ_F @ PK2_func(localJ_F, Cp[localJ_gaussIDs]) - PK1[localJ_gaussIDs]) / d
-    return jac_PK1.ravel()
+    return (localI_F @ PK2_func(localI_F, Cp[localI_gaussIDs]) - PK1[localI_gaussIDs]).ravel() / d
 
 
-def TrialFunction(V:FunctionSpace,dim=2):
+def TrialVectorFunction(V:FunctionSpace,dim=2):
     if dim==2:
         trial=V.node_coord.copy()
     return trial
 
-def TestFunctions(V:FunctionSpace,dim=2):
-    print("testFuncs preparation...")
-    if dim==2:
-        v_= np.reshape(np.identity(V.node_coord.shape[0]*dim),(V.node_coord.shape[0]*dim,V.node_coord.shape[0],dim))
+class TestVectorFunctions:
+    def __init__(self,V:FunctionSpace,dim=2):
+        node_coord=V.node_coord
+        self.TestFuncs= np.reshape(np.identity(node_coord.shape[0]*dim),(node_coord.shape[0]*dim,node_coord.shape[0],dim))
+        self.V=V
+        self._dim=dim
 
-        TestFuncs=sp.csc_matrix( np.array([ (V.Nabla(v_[i])*(V.cellArea*V.sqrt_Jp)[:,np.newaxis,np.newaxis]).ravel() for i in range(V.node_coord.shape[0]*2)]).T )
-    print("testFuncs completed")
+        self._TestSparse_flag=False
 
-    return TestFuncs
+    def _GenerateTestSparse(self,YparaID_to_YravelID):
+        if self._TestSparse_flag:
+            pass
+        else:
+            V = self.V
+            nodeI_cellID, cellNum, Nabla, Jp_dV, v_, dim = V.nodeI_cellID, V.cell_nodeID.shape[0], V._Nabla_N3_NodeI, (V.cellArea * V.Jp)[:,np.newaxis,np.newaxis], self.TestFuncs, self._dim
+
+            print("testSparseMat preparation...")
+            # self.dim is the degree of freedom of the trial func at each point, 2*self.dim is the degree of freedom of its Nabla
+
+            temp_Row = np.array([])
+            indices_Col = np.array([])  # testids
+            Data = np.array([])
+            for i in range(YparaID_to_YravelID.shape[0]):
+                nodei = YparaID_to_YravelID[i]
+                I = int(nodei / 2)
+                cellids = nodeI_cellID[I]
+                temp_Row = np.append(temp_Row, cellids)
+                indices_Col = np.append(indices_Col, i * np.ones(2 * dim * cellids.shape[0], dtype="int32"))  # testids
+                Data = np.append(Data, (Nabla(v_[nodei], I) * Jp_dV[cellids]).ravel())
+            temp_Row = 2 * dim * temp_Row  # cellIds*2*self.dim
+            indices_Row = np.array([temp_Row + i for i in range(2 * dim)]).T.ravel()
+
+            self.sparse_jacPK1_i, self.sparse_jacPK1_j, self.sparse_jacPK1_shape = indices_Col, indices_Row, (
+            YparaID_to_YravelID.shape[0], cellNum * 2 * dim)
+            self.testSparse = sp.coo_matrix((Data, (indices_Row, indices_Col)),
+                                            shape=(cellNum * 2 * dim, YparaID_to_YravelID.shape[
+                                                0]))  # [i,0,j]   j=(4*C,4*C+1,4*C+2,4*C+3) of (F_00,F_01,F_10,F_11)@(C-th cell)          i-th testfunc
+            print("testSparse completed")
+            self._TestSparse_flag = True
+
 
 class EquilibriumProblem:
-    def __init__(self,TrialFunc:np.ndarray,TestFuncs:list,V:FunctionSpace,psi_func,PK2_func):
+    def __init__(self,TrialFunc:np.ndarray,TestFuncs:TestVectorFunctions,psi_func,PK2_func):
         self.y_initial_param=TrialFunc.ravel()
         self.y_shape=TrialFunc.shape
 
+        self.dim=1
+        for i in TrialFunc.shape[1:]:
+            self.dim=self.dim*i
+
+        V=TestFuncs.V
         self.V=V
         self.gauss_area=V.cellArea
         self.PK2_func=PK2_func
@@ -52,12 +87,38 @@ class EquilibriumProblem:
         self.dy=np.identity(self.y_para_len)*self.d
 
         self.y_=TrialFunc.copy()
-        self.YparaID_to_YravelID=np.arange(0,self.V.node_coord.shape[0]*2,1,dtype="int32")
+        self.YparaID_to_YravelID=np.arange(0,self.V.node_coord.shape[0]*self.dim,1,dtype="int32")
 
 
         self._other_constraint_flag=False
         self._dirichlet_flag=False
-        self._dirichlet_u0Independent_flag=False
+
+
+    def _GenerateTestSparse(self):
+        V=self.V
+        nodeI_cellID,cellNum,Nabla,Jp_dV, YparaID_to_YravelID,v_,dim= V.nodeI_cellID,V.cell_nodeID.shape[0],V._Nabla_N3_NodeI,(V.cellArea * V.Jp)[:, np.newaxis, np.newaxis],self.YparaID_to_YravelID,self.TestFuncs,self.dim
+
+        print("testSparseMat preparation...")
+        #self.dim is the degree of freedom of the trial func at each point, 2*self.dim is the degree of freedom of its Nabla
+
+        temp_Row=np.array([])
+        indices_Col=np.array([])#testids
+        Data=np.array([])
+        for i in range(YparaID_to_YravelID.shape[0]):
+            nodei=YparaID_to_YravelID[i]
+            I=int(nodei/2)
+            cellids=nodeI_cellID[I]
+            temp_Row=np.append(temp_Row,cellids)
+            indices_Col=np.append(indices_Col,i*np.ones(2*dim*cellids.shape[0],dtype="int32")) #testids
+            Data=np.append(Data,(Nabla(v_[nodei],I)*Jp_dV[cellids]).ravel())
+        temp_Row=2*dim*temp_Row #cellIds*2*self.dim
+        indices_Row = np.array([temp_Row+i for i in range(2*dim)]).T.ravel()
+
+
+        self.sparse_jacPK1_i,self.sparse_jacPK1_j,self.sparse_jacPK1_shape=indices_Col,indices_Row,(YparaID_to_YravelID.shape[0],cellNum*2*dim)
+        self.testSparse = sp.coo_matrix((Data, (indices_Row, indices_Col)),
+                                  shape=(cellNum*2*dim,YparaID_to_YravelID.shape[0]))  # [i,0,j]   j=(4*C,4*C+1,4*C+2,4*C+3) of (F_00,F_01,F_10,F_11)@(C-th cell)          i-th testfunc
+        print("testSparse completed")
 
 
     def set_dirichlet(self,coords_indices,u):
@@ -98,7 +159,8 @@ class EquilibriumProblem:
         return pary_i_cons_j,constraint0
 
     def _Jac_and_Hess_E(self,y_para,tol,rel_tol):
-        y_shape,y_,d,dy,test_funcs,GArea,Cp =self.y_shape,self.y_.ravel(), self.d,self.dy,self.TestFuncs,self.gauss_area, self.Cp
+        y_shape,y_,d,dy,test_sparse,GArea,Cp =self.y_shape,self.y_.ravel(), self.d,self.dy,self.TestFuncs.testSparse,self.gauss_area, self.Cp
+        sparse_jacPK1_i, sparse_jacPK1_j, sparse_jacPK1_shape = self.TestFuncs.sparse_jacPK1_i, self.TestFuncs.sparse_jacPK1_j, self.TestFuncs.sparse_jacPK1_shape
         PK2_func,V_Nabla_N3_J,V_Nabla=self.PK2_func,self.V._Nabla_N3_NodeI,self.V.Nabla
         nodeI_gaussID, YparaID_to_YravelID= self.nodeI_gaussID, self.YparaID_to_YravelID
 
@@ -108,7 +170,7 @@ class EquilibriumProblem:
         F=V_Nabla(np.reshape(y_,self.y_shape))
         PK1=F@PK2_func(F,Cp)
 
-        jac=sp.csr_matrix(PK1.ravel()).dot(test_funcs[:,YparaID_to_YravelID]).toarray().ravel()
+        jac=sp.csr_matrix(PK1.ravel()).dot(test_sparse).toarray().ravel()
         err,flag=np.linalg.norm(jac)/np.sqrt(jac.shape[0]),True
         hess=sp.csc_matrix([[0]])
 
@@ -122,7 +184,11 @@ class EquilibriumProblem:
 
         if err>tol and flag:
 
-            hess=(sp.csc_matrix([ jac_PK1_i(PK1,Cp,nodeI_gaussID,YparaID_to_YravelID[i],y_,dy,d,y_shape,V_Nabla_N3_J,PK2_func)   for i in range(YparaID_to_YravelID.shape[0]) ] ).dot(test_funcs[:,YparaID_to_YravelID])).toarray()
+            Data=np.array([])
+            for nodei in YparaID_to_YravelID:
+                Data=np.append(Data,jac_PK1_i(PK1, Cp, nodeI_gaussID, nodei, y_, dy, d, y_shape, V_Nabla_N3_J, PK2_func))
+
+            hess=sp.coo_matrix(  (Data,(sparse_jacPK1_i,sparse_jacPK1_j)),shape= sparse_jacPK1_shape    ).dot(test_sparse).toarray()
 
         ener=np.sum(self.psi_func(F,Cp)*GArea)
 
@@ -173,6 +239,7 @@ class EquilibriumProblem:
                   )
         return y_para,energy
     def Solve_ByNewton(self,tol=0.01,rel_tol=0.01):
+        self.TestFuncs._GenerateTestSparse(self.YparaID_to_YravelID)
 
         start=time.time()
         print("\n\nstart iteration...")

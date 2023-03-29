@@ -42,9 +42,11 @@ class FunctionSpace:
         self.NablaFunc=[self._NablaScalar,self._NablaVec]
         self._nablaI_basis=[self._Nabla_N3_NodeI_Scalar,self._Nabla_N3_NodeI_Vector]
 
+
+
         print("FunctionSpace preparation completed...")
     def set_Cp(self,Cp):
-        self.sqrt_Jp=np.sqrt(np.linalg.det(Cp))
+        self.Jp=np.sqrt(np.linalg.det(Cp))
         self.Cp=Cp
     def Gauss2Node(self,f:np.ndarray):
         NodeValue=[]
