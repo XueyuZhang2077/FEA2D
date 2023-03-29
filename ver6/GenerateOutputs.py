@@ -47,7 +47,7 @@ Plas_work = np.sum(s * V.cellArea)  # 10**-6 J/mm
 
 
 #define test functions
-
+y_Tests = TestVectorFunctions(V)
 
 # Define PK2(F,Cp) and psi(F,Cp) of the St.Venant-Kirchhoff constitutive law.
 def PK2_func(F, Cp):
@@ -84,40 +84,40 @@ for testID in range(loadings.shape[0]):
 
 
     y_Trial = TrialVectorFunction(V)
-    y_Tests = TestVectorFunctions(V)
-    # if testID > 0:
-    #     y_Trial.baseValue = np.loadtxt("yTrial.txt")
-    # y_Trial.baseValue=loadtxt("yTrial_"+ V.name +".txt")
+    if testID > 0:
+        y = np.loadtxt("yTrial.txt")
+    # y=loadtxt("yTrial_"+ V.name +".txt")
 
-    problem = EquilibriumProblem(y_Trial, y_Tests, psi, PK2_func)
+    problem = EquilibriumProblem(y_Trial, y_Tests,psi, PK2_func)
 
     ################boundary
     if loading==None:
-        d1 = np.linalg.norm(V.node_coord - np.array([0, 0]), axis=1)
+        d1 = np.linalg.norm(V.node_coord - np.array([np.min(V.node_coord[:,0]), np.min(V.node_coord[:,1])]), axis=1)
         _id1 = np.where((d1 == min(d1)))[0]
 
 
-        d2 = np.linalg.norm(V.node_coord - np.array([10, 0]), axis=1)
+        d2 = np.linalg.norm(V.node_coord - np.array([np.max(V.node_coord[:,0]), np.min(V.node_coord[:,1])]), axis=1)
         _id2 = np.where((d2 == min(d2)))[0]
 
         problem.set_dirichlet(np.concatenate((_id1*2,
                                               _id1*2+1,
                                               _id2*2+1)),
                               np.array([0,0,0.0]))
-
     else:
-
-
         x2_max = np.max(V.node_coord[:, 1])
-        Ids_top = np.where(V.node_coord[:, 1] == x2_max)[0]*2+1
-        u_top=np.zeros(Ids_top.shape[0])+loading
-
+        Ids_top = np.where(V.node_coord[:, 1] == x2_max)[0]
+        u_top = np.zeros(Ids_top.shape[0])
+        Ids_top = np.append(Ids_top*2,Ids_top*2+1)
+        u_top=np.append(u_top,u_top+loading)
 
         d1 = np.linalg.norm(V.node_coord - np.array([0, 0]), axis=1)
         _id1 = np.where((d1 == min(d1)))[0]
         x2_min = np.min(V.node_coord[:, 1])
-        Ids_bot = np.append(_id1*2,np.where(V.node_coord[:, 1] == x2_min)[0]*2+1)
+        Ids_bot=np.where(V.node_coord[:, 1] == x2_min)[0]
+        # Ids_bot = np.append(_id1*2,np.where(V.node_coord[:, 1] == x2_min)[0]*2+1)
         u_bot=np.zeros(Ids_bot.shape[0])
+        Ids_bot=np.append(Ids_bot*2,Ids_bot*2+1)
+        u_bot=np.append(u_bot,u_bot)
 
 
 
@@ -131,7 +131,7 @@ for testID in range(loadings.shape[0]):
 
     y, energy = problem.Solve_ByNewton(0.001, 0.001)
     np.savetxt("yTrial_" + V.name + ".txt", y)
-    # np.savetxt("yTrial.txt", y.baseValue)
+    np.savetxt("yTrial.txt", y)
 
     # saveVTKdata
     u = y-V.node_coord
