@@ -1,0 +1,8 @@
+gmsh==4.11.1
+matplotlib==3.7.1
+meshio==5.3.4
+numpy==1.24.3
+pandas==2.0.2
+pygmsh==7.1.17
+scipy==1.10.1
+

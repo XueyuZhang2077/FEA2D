@@ -8,11 +8,11 @@ from FEM2D_ver6_Order1 import *
 
 
 vertices = pd.read_excel("Input.xlsx", sheet_name="Vertices_Coords").to_numpy()
-domains = pd.read_excel("Input.xlsx", sheet_name="Domain_VertID").to_numpy()[:, 1:]
+domains = pd.read_excel("Input.xlsx", sheet_name="Domain_VertID").to_numpy()[:,1:]
 
-info = pd.read_excel("Input.xlsx", sheet_name="Info").to_numpy()
+info = pd.read_excel("Input.xlsx", sheet_name="Elasticity").to_numpy()
 domain_Cp = pd.read_excel("Input.xlsx", sheet_name="Domain_Cp").to_numpy()[:, 1:]
-loadings = pd.read_excel("Input.xlsx", sheet_name="Load_Condition").to_numpy()
+loadings = pd.read_excel("Input.xlsx", sheet_name="Bound_Condition").to_numpy()
 G = info[0, 0]
 nu = info[0, 1]
 mu= 2 * G * nu / (1 - 2 * nu)
