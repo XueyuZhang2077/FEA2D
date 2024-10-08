@@ -1,5 +1,6 @@
 import meshio
-from FEM2D_ver7_Order1.MeshManager import *
+import numpy as np
+from DIY_FEM.MeshManager2D import *
 
 
 def CellArea(node_coord:np.ndarray,cell_nodeID:np.ndarray):
@@ -84,10 +85,10 @@ def QU_decompose(F):
     mu_u=np.einsum("...i,...ji->...ji",mu,u)
     U=np.einsum("...ji,...ki->...jk",mu_u,u)
     Q=np.einsum("...ij,...jk->...ik",F,np.linalg.inv(U))
-    return (Q,U)
+    return Q,U
 
-class FunctionSpace:
-    def __init__(self,mesh:Mesh2D,name="unknownSpace",PrepareXI=True):
+class FunctionSpace2D:
+    def __init__(self,mesh:Mesh2D,name="unknownSpace",PrepareXI=True,PrepareSurfIDs=True):
         '''
         関数空間 {y(x)}=V　のy(x)を
         y(x)=y(x;node0におけるy値)+y(x;node1におけるy値)+y(x;node2におけるy値)+...
@@ -117,6 +118,7 @@ class FunctionSpace:
         self.cell_nodeID=mesh.cell_nodeID
         self.domain_cellID=mesh.domain_cellID
         self.name=name
+        self.dim=2
         '''
         domain_cellID=[domain0に属するたくさんのセルのindices(例,2,3,5,6),
                        domain1に属するたくさんのセルのindices(例,1,4,7,8,9,10),
@@ -130,9 +132,43 @@ class FunctionSpace:
 
         self.cell_coord,self.cellArea=CellArea(self.node_coord,self.cell_nodeID)#cell_coordは，各セルのgaussian積分点の座標を表し，cellAreaは各セルの面積を表す．
         cell_node_coord=self.node_coord[self.cell_nodeID]#CellArea()関数のcell_node_coordに関する説明に参照
-        x0,x1,x2=cell_node_coord[:,0,:],cell_node_coord[:,1,:],cell_node_coord[:,2,:]
+        x0,x1,ones=cell_node_coord[:,:,0],cell_node_coord[:,:,1],np.ones(cell_node_coord[:,:,1].shape,dtype=float)
         if PrepareXI:
-            self.XI=np.linalg.inv(np.append((x1-x0)[:,:,np.newaxis],(x2-x0)[:,:,np.newaxis],axis=2))
+            self.XI=np.linalg.inv(np.concatenate((x0[:,:,np.newaxis],x1[:,:,np.newaxis],ones[:,:,np.newaxis]),axis=2))
+            self.Na=np.einsum("ij,...jk->...ik",np.array([[1,0,0],
+                                                          [0,1,0]]),self.XI)
+
+        ############FreeSurfaces###############################
+        if PrepareSurfIDs:
+            cell_surf_nodeID=np.concatenate((self.cell_nodeID[:,[0,1]][:,np.newaxis],
+                                            self.cell_nodeID[:,[0,2]][:,np.newaxis],
+                                            self.cell_nodeID[:,[1,2]][:,np.newaxis]),axis=1)
+            cell_surfSingleID=np.concatenate((self.cell_nodeID[:,[2]],
+                                              self.cell_nodeID[:,[1]],
+                                              self.cell_nodeID[:,[0]]),axis=1)
+
+            cell_surf_nodeID=cell_surf_nodeID.reshape((cell_surf_nodeID.shape[0]*cell_surf_nodeID.shape[1],cell_surf_nodeID.shape[2]))
+            cell_surfSingleID=cell_surfSingleID.ravel()
+
+            cell_surf_nodeID=np.sort(cell_surf_nodeID,axis=1)
+            unique,indices,counts=np.unique(cell_surf_nodeID,axis=0,return_index=True,return_counts=True)
+
+            cell_surfSingleID=cell_surfSingleID[indices]
+            surfID=(counts==1)
+            self.surf_vtxNID=unique[surfID]
+            self.surf_outNID=cell_surfSingleID[surfID]
+
+            surf_node_coord=self.node_coord[self.surf_vtxNID]
+            surf_outnodecoord=self.node_coord[self.surf_outNID]
+            self.surf_coord=np.sum(surf_node_coord,axis=1)/2
+            self.surf_dA=np.einsum("ij,...j->...i",np.array([[0,-1],
+                                                             [1,0]]),surf_node_coord[:,0]-surf_node_coord[:,1])
+            self.surf_dA=self.surf_dA*np.sign( np.sum(self.surf_dA*(surf_node_coord[:,0]-surf_outnodecoord)   ,axis=1) )[:,np.newaxis]
+            self.surf_cellID=np.int_(indices[counts==1]/3)
+        #######################################################
+
+
+
         #######################################################
         print("           Local linearMapping completed.")
         #############preparedForselfDefinedIterator#############
@@ -151,9 +187,6 @@ class FunctionSpace:
         _NablaScalar: [node0 scalar, node1 scalar,...] -> [cell0 scalarの勾配, cell1 scalarの勾配,...]
         _NablaVec: 例[node0 y, node1 y,...] -> [cell0 変形勾配, cell1 変形勾配, ...] 
         '''
-        self._nablaI_basis=[self._Nabla_N3_NodeI_Scalar,self._Nabla_N3_NodeI_Vector]
-        '''self._Nabla_N3_NodeI_Scalar,self._Nabla_N3_NodeI_Vector: node0を共通点とするセルのみにおいて，勾配・変形勾配を計算するための関数'''
-
 
         print("FunctionSpace preparation completed...")
 
@@ -250,15 +283,6 @@ class FunctionSpace:
                 data+=[np.nan]
         return np.array(data)
 
-    def set_Cp(self,Cp):
-        '''
-        各セルにおける右コーシーグリーン(eigenひずみに対応する部分，弾性ひずみの部分は含まれていない)
-
-        :param Cp: np.array([cell0におけるCp, cell1におけるCp, ...])
-        :return: None
-        '''
-        self.Jp=np.sqrt(np.linalg.det(Cp))
-        self.Cp=Cp
     def Gauss2Node(self,f:np.ndarray):
         '''
         Gaussian積分点での関数値から，
@@ -332,46 +356,6 @@ class FunctionSpace:
         '''
 
         return GaussValue
-    def _Nabla_N3_NodeI(self,f,I):
-        '''
-        I番目のnodeの，第一近傍のセルらにおける勾配を算出する
-        :param f: [f(node0), f(node1), f(node2), ....] 各ノードにおける関数値
-        :param I: nodeのindex
-        :return:  [nodeIの第一近傍のセル0におけるNabla f, nodeIの第一近傍のセル1におけるNabla f, ...]
-        self._nablaI_basis=[self._Nabla_N3_NodeI_Scalar,self._Nabla_N3_NodeI_Vector]であるため，
-        fはベクトルばn.dimが1である場合，scalar場として認識されself._nablaI_basis[0]で指定されるscalar fieldの勾配(@nodeIの第一近傍のセルのgaussian点)を計算するための関数を使う．
-        fはベクトルばn.dimが2である場合，vector場として認識されself._nablaI_basis[1]で指定されるvector fieldの勾配(@nodeIの第一近傍のセルのgaussian点)を計算するための関数を使う．
-        '''
-        return self._nablaI_basis[f.ndim-1](f,I)
-
-    def _Nabla_N3_NodeI_Vector(self,y,I):
-        '''
-        yはvec. field
-        I番目のnodeの，第一近傍のセルらにおける変形勾配(yは現配置での座標を表す時)を算出する
-        :param y: [y(node0), y(node1), y(node2), ....] 各ノードにおけるベクトル値
-        :param I: nodeのindex
-        :return:  [nodeIの第一近傍のセル0におけるNabla y, nodeIの第一近傍のセル1におけるNabla y, ...]
-        '''
-        cellids=self.nodeI_cellID[I]
-        cell_node_y=y[self.cell_nodeID[cellids]]
-        y0,y1,y2=cell_node_y[:,0],cell_node_y[:,1],cell_node_y[:,2]
-        Y=np.append((y1-y0)[:,:,np.newaxis],(y2-y0)[:,:,np.newaxis],axis=2)
-        return np.einsum("...ij,...jk->...ik",Y,self.XI[cellids],optimize="greedy")
-
-    def _Nabla_N3_NodeI_Scalar(self,y,I):
-        '''
-        yはscalar field
-        I番目のnodeの，第一近傍のセルらにおける変形勾配(yは現配置での座標を表す時)を算出する
-        :param y: [y(node0), y(node1), y(node2), ....] 各ノードにおけるスカラー値
-        :param I: nodeのindex
-        :return:  [nodeIの第一近傍のセル0におけるNabla y, nodeIの第一近傍のセル1におけるNabla y, ...]
-        '''
-        cellids=self.nodeI_cellID[I]
-        cell_nodey=y[self.cell_nodeID[cellids]]
-        y0,y1,y2=cell_nodey[:,0],cell_nodey[:,1],cell_nodey[:,2]
-        Y=np.append((y1-y0)[:,np.newaxis],(y2-y0)[:,np.newaxis],axis=1)
-        return np.einsum("...i,...ij->...j",Y,self.XI[cellids],optimize="greedy")
-
 
     def Nabla(self,f):
         '''
@@ -385,29 +369,17 @@ class FunctionSpace:
         return self.NablaFunc[f.ndim-1](f)
 
     def _NablaVec(self,y):
-        '''
-        yはvec. field
-        すべての点におけるyの勾配を算出する
-        :param y: [y(node0), y(node1), y(node2), ....] 各ノードにおけるベクトル値
-        :return:  [Nabla y @ cell0, Nabla y @ cell1, ...]
-        '''
-        cell_node_y=y[self.cell_nodeID]
-        y0,y1,y2=cell_node_y[:,0],cell_node_y[:,1],cell_node_y[:,2]
-        Y=np.append((y1-y0)[:,:,np.newaxis],(y2-y0)[:,:,np.newaxis],axis=2)
-        return np.einsum("...ij,...jk->...ik",Y,self.XI,optimize="greedy")
+        return np.einsum("...ij,...jk->...ki",self.Na,y[self.cell_nodeID],optimize="greedy")
 
     def _NablaScalar(self,y):
-        '''
-        yはscalar field
-        すべての点におけるyの勾配を算出する
-        :param y: [y(node0), y(node1), y(node2), ....] 各ノードにおけるスカラー値
-        :return:  [Nabla y @ cell0, Nabla y @ cell1, ...]
-        '''
-        cell_nodey=y[self.cell_nodeID]
-        y0,y1,y2=cell_nodey[:,0],cell_nodey[:,1],cell_nodey[:,2]
-        Y=np.append((y1-y0)[:,np.newaxis],(y2-y0)[:,np.newaxis],axis=1)
-        return np.einsum("...i,...ij->...j",Y,self.XI,optimize="greedy")
+        return np.einsum("...ij,...j->...i",self.Na,y[self.cell_nodeID],optimize="greedy")
 
+    def PlotSurf(self):
+        for nodes in self.node_coord[self.surf_vtxNID]:
+            plt.plot(nodes[:,0],nodes[:,1])
+
+        plt.quiver(self.surf_coord[:,0],self.surf_coord[:,1],self.surf_dA[:,0],self.surf_dA[:,1])
+        plt.show()
     def SaveFuncs(self,funcs:list,funcNames:list):
         '''
         各テンソル場とメッシュを {self.name}.vtkのファイルに保存する
@@ -453,5 +425,11 @@ class FunctionSpace:
 
 
 
-
+if __name__ == '__main__':
+    msh=GenerateMeshes2D(np.array([[0.0,0.0],
+                                   [1.0,0.0],
+                                   [1.0,1.0],
+                                   [0.0,1.0]]),np.array([0.1,0.1,0.1,0.1]),[np.array([0,1,2,3])])
+    V=FunctionSpace2D(msh)
+    V.PlotSurf()
 

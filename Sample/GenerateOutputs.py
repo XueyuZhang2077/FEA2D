@@ -2,7 +2,7 @@ import os
 
 import pandas as pd
 import shutil
-from FEM2D_ver6_Order1 import *
+from DIY_FEM.Solver import *
 # from FEM2D_Cupy_Order1 import *
 
 
@@ -15,7 +15,7 @@ domain_Cp = pd.read_excel("Input.xlsx", sheet_name="Domain_Cp").to_numpy()[:, 1:
 loadings = pd.read_excel("Input.xlsx", sheet_name="Bound_Condition").to_numpy()
 G = info[0, 0]
 nu = info[0, 1]
-mu= 2 * G * nu / (1 - 2 * nu)
+lmda= 2 * G * nu / (1 - 2 * nu)
 
 vertices_coord = vertices[:, :2]
 mshSize = vertices[:, 2]
@@ -30,7 +30,7 @@ for i in range(domains.shape[0]):
 mesh = GenerateMeshes2D(vertices_coord, mshSize, domain_vertiexID)
 # mesh.Plot(PointIDs=False,CellIDs=False,Regions=False)
 
-V = FunctionSpace(mesh)
+V = FunctionSpace2D(mesh,name="Sample")
 
 # set Plastic Right Cauchy-Green tensor Cp at each domain
 Cp = np.zeros((V.cell_coord.shape[0], 2, 2))
@@ -39,15 +39,10 @@ for i in range(domains.shape[0]):
     Cp[V.domain_cellID[i], 0, 1] = domain_Cp[i, 1]
     Cp[V.domain_cellID[i], 1, 0] = domain_Cp[i, 1]
     Cp[V.domain_cellID[i], 1, 1] = domain_Cp[i, 2]
-V.set_Cp(Cp)
 
 
 s = Cp[:, 1, 0]
-Plas_work = np.sum(s * V.cellArea)  # 10**-6 J/mm
 
-
-#define test functions
-y_Tests = TestVectorFunctions(V)
 
 # Define P-K1 stress PK1(F,Cp) and energy density psi(F,Cp) according to the St.Venant-Kirchhoff constitutive law.
 def PK1_func(F, Cp):
@@ -60,7 +55,7 @@ def PK1_func(F, Cp):
     CpI_dot_E = np.einsum("gij,gjk->gik", CpI, E)
     CpI_dot_E_dot_CpIT = np.einsum("gij,gkj->gik", CpI_dot_E, CpI)
 
-    return F @ (CpI * CpI_ddot_E[:, np.newaxis, np.newaxis] * mu + CpI_dot_E_dot_CpIT * 2 * G) * np.sqrt(
+    return F @ (CpI * CpI_ddot_E[:, np.newaxis, np.newaxis] * lmda + CpI_dot_E_dot_CpIT * 2 * G) * np.sqrt(
         np.linalg.det(Cp))[:, np.newaxis, np.newaxis]
 
 
@@ -76,7 +71,7 @@ def psi(F, Cp):  # Energy per unit thickness    * 10^-3 J/m   or    J/mm
     E_dot_CpIT = np.einsum("gij,gkj->gik", E, CpI)
 
     CpI_dot_ET_ddot_E_dot_CpIT = np.einsum("gij,gij->g", CpI_dot_ET, E_dot_CpIT)
-    return (CpI_ddot_E_exp2 * mu / 2 + CpI_dot_ET_ddot_E_dot_CpIT * G) * np.sqrt(np.linalg.det(Cp))
+    return (CpI_ddot_E_exp2 * lmda / 2 + CpI_dot_ET_ddot_E_dot_CpIT * G) * np.sqrt(np.linalg.det(Cp))
 
 
 
@@ -95,7 +90,6 @@ for testID in range(loadings.shape[0]):
         y = np.loadtxt("yTrial.txt")
     # y=loadtxt("yTrial_"+ V.name +".txt")
 
-    problem = EquilibriumProblem(y_Trial, y_Tests,psi, PK1_func)
 
     #########set dirichlet boundary condition#######
     x2_max = np.max(V.node_coord[:, 1])
@@ -118,28 +112,40 @@ for testID in range(loadings.shape[0]):
     Ids=np.append(Ids_top,Ids_bot,axis=0)
 
 
-    u=np.append(u_top,u_bot,axis=0)
-    problem.set_dirichlet(Ids,u)
+    u_bound=np.append(u_top,u_bot,axis=0)
+    y_bound=V.node_coord.ravel()[Ids]+u_bound
+
+    #set test functions & trial functions
+    y_Tests=TestVectorFunctions(V,DirichletIDs=Ids)
+    y_Trial=TrialVectorFunction(V,DirichletVals=y_bound)
+
+    #define problem
+    prob=EquilibriumProblem_Isotropic(y_Trial,y_Tests,Cp,lmda,G)
+
+
+
 
 
     #######solve the PDE of the stress equilibrium Eq.#######
-    y, energy = problem.Solve_ByNewton(0.001, 0.001)
+    y= prob.solve(0.001, 0.001)
     np.savetxt("yTrial_" + V.name + ".txt", y)
     np.savetxt("yTrial.txt", y)
 
     # saveVTKdata
     u = y-V.node_coord
     F = V.Nabla(y)
-    EnerDens = psi(F, Cp)
-    PK1 = PK1_func(F, Cp)
-    PK2 =np.einsum("gij,gjk->gik",np.linalg.inv(F),PK1)/np.sqrt(np.linalg.det(Cp))[:,np.newaxis,np.newaxis]
-    Sigma = np.einsum("gij,gkj->gik",PK1,F) / np.linalg.det(F)[:,np.newaxis,np.newaxis]
+    C = np.einsum("gji,gjk->gik", F, F)
+    E = (C - Cp) * 0.5
+    CpI = np.linalg.inv(Cp)
+    S = lmda * np.einsum("...ij,...kl,...kl->...ij", CpI, CpI, E) + 2 * G * np.einsum("...ik,...jl,...kl->...ij", CpI,
+                                                                                      CpI, E)
+    P=F@S
 
-    V.SaveFuncs([u, F, Cp, PK1, PK2, Sigma, EnerDens],
+    Sigma = np.einsum("gij,gkj->gik",P,F) / np.linalg.det(F)[:,np.newaxis,np.newaxis]
+
+    psi=1/2*np.einsum("...ij,...kj,...ki->...",S,E,np.linalg.inv(F))
+
+    V.SaveFuncs([u, F, Cp, P, S, Sigma, psi],
                 ["u", "F", "Cp", "PK1", "PK2", "Sigma", "EnergyDensity"])
-#     if loading == None:
-#         strain_energy_TotWork.append(["None", energy])
-#     else:
-#         strain_energy_TotWork.append([loading / (x2_max - x2_min), energy,energy+Plas_work])
-# savetxt("\strain_energy_J_per_mm.txt", array(strain_energy_TotWork))
+
 

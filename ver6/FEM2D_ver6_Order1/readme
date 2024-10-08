@@ -1,7 +1,0 @@
-when using ver7
-
-don't forget take into account the term "*np.sqrt(np.linalg.det(Cp))" in PK1_func
-
-while in ver<7
-
-it is not considered
